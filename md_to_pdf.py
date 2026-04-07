@@ -7,7 +7,6 @@ Usage: python md_to_pdf.py input.md [output.pdf]
 import sys
 import re
 import argparse
-import math
 from pathlib import Path
 
 # Install dependencies if needed:
@@ -259,7 +258,7 @@ class MermaidXYChart(Flowable):
             legend_offset += 95
 
 
-def mermaid_block_to_flowables(code: str):
+def mermaid_block_to_flowables(code: str, dark_code: bool = False):
     chart = parse_mermaid_xychart(code)
     if chart:
         return [
@@ -270,7 +269,7 @@ def mermaid_block_to_flowables(code: str):
 
     return [
         Spacer(1, 6),
-        DarkCodeBlock(code, available_width=None),
+        DarkCodeBlock(code, available_width=None, dark=dark_code),
         Spacer(1, 10),
     ]
 
@@ -288,11 +287,12 @@ class DarkCodeBlock(Flowable):
     PAD_V     = 12   # vertical padding
     RADIUS    = 5
 
-    def __init__(self, code: str, available_width: float | None = None):
+    def __init__(self, code: str, available_width: float | None = None, dark: bool = False):
         super().__init__()
         self.code = code
         self.available_width = available_width
         self.lines = code.splitlines()
+        self.dark = dark
 
     def wrap(self, availWidth, availHeight):
         if self.available_width is None:
@@ -315,8 +315,8 @@ class DarkCodeBlock(Flowable):
         first = "\n".join(self.lines[:max_lines])
         rest = "\n".join(self.lines[max_lines:])
         return [
-            DarkCodeBlock(first, self.available_width),
-            DarkCodeBlock(rest, self.available_width),
+            DarkCodeBlock(first, self.available_width, dark=self.dark),
+            DarkCodeBlock(rest, self.available_width, dark=self.dark),
         ]
 
     def draw(self):
@@ -324,13 +324,22 @@ class DarkCodeBlock(Flowable):
         w, h = self.width, self.height
 
         # Draw rounded dark background
-        c.setFillColor(self.BG)
-        c.setStrokeColor(self.BORDER)
+        if self.dark:
+            bg = self.BG
+            border = self.BORDER
+            fg = self.FG
+        else:
+            bg = colors.HexColor("#eef2f7")
+            border = colors.HexColor("#cbd5e1")
+            fg = colors.HexColor("#111827")
+
+        c.setFillColor(bg)
+        c.setStrokeColor(border)
         c.setLineWidth(0.5)
         c.roundRect(0, 0, w, h, self.RADIUS, stroke=1, fill=1)
 
         # Draw each line of code in bright colour
-        c.setFillColor(self.FG)
+        c.setFillColor(fg)
         c.setFont(self.FONT, self.FONT_SIZE)
         y = h - self.PAD_V - self.FONT_SIZE   # start from top
         for line in self.lines:
@@ -359,7 +368,7 @@ def build_styles():
     return custom
 
 
-def md_inline_to_rl(text):
+def md_inline_to_rl(text, dark_code: bool = False):
     """Convert inline markdown (bold, italic, inline code) to ReportLab XML."""
     code_spans = []
 
@@ -381,6 +390,8 @@ def md_inline_to_rl(text):
     text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2" color="blue">\1</a>', text)
 
     # Restore inline code spans
+    code_color = "#f8f8f2" if dark_code else "#1f2937"
+    code_bg = "#1e1e2e" if dark_code else "#e5e7eb"
     for idx, code in enumerate(code_spans):
         escaped_code = (
             code.replace("&", "&amp;")
@@ -389,13 +400,59 @@ def md_inline_to_rl(text):
         )
         text = text.replace(
             f"@@CODE{idx}@@",
-            f'<font name="Courier" size="9" color="#f8f8f2" backColor="#1e1e2e"> {escaped_code} </font>'
+            f'<font name="Courier" size="9" color="{code_color}" backColor="{code_bg}"> {escaped_code} </font>'
         )
 
     return text
 
 
-def parse_md_to_flowables(md_text, styles):
+def split_md_table_row(line: str):
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [c.strip() for c in stripped.split("|")]
+
+
+def is_table_separator_line(line: str):
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    cells = [c.strip() for c in stripped.split("|")]
+    if not cells:
+        return False
+    return all(re.match(r"^:?-{3,}:?$", c) for c in cells)
+
+
+def make_md_table_flowable(headers, rows, styles, dark_code: bool = False):
+    table_data = [[Paragraph(md_inline_to_rl(h, dark_code=dark_code), styles["body"]) for h in headers]]
+    for row in rows:
+        padded = row + ([""] * (len(headers) - len(row)))
+        table_data.append(
+            [Paragraph(md_inline_to_rl(cell, dark_code=dark_code), styles["body"]) for cell in padded[:len(headers)]]
+        )
+
+    table = Table(table_data, repeatRows=1, hAlign="LEFT")
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e2e8f0")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#0f172a")),
+        ("GRID", (0, 0), (-1, -1), 0.6, colors.HexColor("#94a3b8")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+    ]))
+    return table
+
+
+def parse_md_to_flowables(md_text, styles, dark_code: bool = False):
     flowables = []
     lines = md_text.splitlines()
     i = 0
@@ -413,10 +470,10 @@ def parse_md_to_flowables(md_text, styles):
                 i += 1
             code = "\n".join(code_lines)
             if fence_lang == "mermaid":
-                flowables.extend(mermaid_block_to_flowables(code))
+                flowables.extend(mermaid_block_to_flowables(code, dark_code=dark_code))
             else:
                 flowables.append(Spacer(1, 6))
-                flowables.append(DarkCodeBlock(code, available_width=None))
+                flowables.append(DarkCodeBlock(code, available_width=None, dark=dark_code))
                 flowables.append(Spacer(1, 10))
             i += 1
             continue
@@ -429,14 +486,30 @@ def parse_md_to_flowables(md_text, styles):
             while i < len(lines) and lines[i].strip() != "":
                 mermaid_lines.append(lines[i])
                 i += 1
-            flowables.extend(mermaid_block_to_flowables("\n".join(mermaid_lines)))
+            flowables.extend(mermaid_block_to_flowables("\n".join(mermaid_lines), dark_code=dark_code))
+            continue
+
+        # Markdown table (pipe table)
+        if i + 1 < len(lines) and "|" in line and is_table_separator_line(lines[i + 1]):
+            headers = split_md_table_row(line)
+            rows = []
+            i += 2
+            while i < len(lines):
+                row_line = lines[i]
+                if row_line.strip() == "" or "|" not in row_line:
+                    break
+                rows.append(split_md_table_row(row_line))
+                i += 1
+            flowables.append(Spacer(1, 6))
+            flowables.append(make_md_table_flowable(headers, rows, styles, dark_code=dark_code))
+            flowables.append(Spacer(1, 10))
             continue
 
         # Headings
         m = re.match(r'^(#{1,6})\s+(.*)', line)
         if m:
             level = len(m.group(1))
-            text = md_inline_to_rl(m.group(2).strip())
+            text = md_inline_to_rl(m.group(2).strip(), dark_code=dark_code)
             style_key = f"h{min(level, 3)}"
             flowables.append(Paragraph(text, styles[style_key]))
             i += 1
@@ -453,7 +526,7 @@ def parse_md_to_flowables(md_text, styles):
         if re.match(r'^[\*\-\+]\s+', line):
             items = []
             while i < len(lines) and re.match(r'^[\*\-\+]\s+', lines[i]):
-                item_text = md_inline_to_rl(re.sub(r'^[\*\-\+]\s+', '', lines[i]))
+                item_text = md_inline_to_rl(re.sub(r'^[\*\-\+]\s+', '', lines[i]), dark_code=dark_code)
                 items.append(ListItem(Paragraph(item_text, styles["li"]), bulletColor=colors.HexColor("#333333")))
                 i += 1
             flowables.append(ListFlowable(items, bulletType='bullet', leftIndent=20))
@@ -463,7 +536,7 @@ def parse_md_to_flowables(md_text, styles):
         if re.match(r'^\d+\.\s+', line):
             items = []
             while i < len(lines) and re.match(r'^\d+\.\s+', lines[i]):
-                item_text = md_inline_to_rl(re.sub(r'^\d+\.\s+', '', lines[i]))
+                item_text = md_inline_to_rl(re.sub(r'^\d+\.\s+', '', lines[i]), dark_code=dark_code)
                 items.append(ListItem(Paragraph(item_text, styles["li"])))
                 i += 1
             flowables.append(ListFlowable(items, bulletType='1', leftIndent=20))
@@ -471,7 +544,7 @@ def parse_md_to_flowables(md_text, styles):
 
         # Blockquote
         if line.startswith("> "):
-            quote_text = md_inline_to_rl(line[2:])
+            quote_text = md_inline_to_rl(line[2:], dark_code=dark_code)
             flowables.append(Paragraph(f'<i>{quote_text}</i>', styles["blockquote"]))
             i += 1
             continue
@@ -489,13 +562,13 @@ def parse_md_to_flowables(md_text, styles):
               and not re.match(r'^\d+\.\s+', lines[i]):
             para_lines.append(lines[i])
             i += 1
-        text = md_inline_to_rl(" ".join(para_lines))
+        text = md_inline_to_rl(" ".join(para_lines), dark_code=dark_code)
         flowables.append(Paragraph(text, styles["body"]))
 
     return flowables
 
 
-def convert(input_path: str, output_path: str):
+def convert(input_path: str, output_path: str, dark_code: bool = False):
     md_text = Path(input_path).read_text(encoding="utf-8")
     styles = build_styles()
 
@@ -508,7 +581,7 @@ def convert(input_path: str, output_path: str):
         bottomMargin=inch,
     )
 
-    flowables = parse_md_to_flowables(md_text, styles)
+    flowables = parse_md_to_flowables(md_text, styles, dark_code=dark_code)
     doc.build(flowables)
     print(f"✅ PDF saved to: {output_path}")
 
@@ -517,6 +590,11 @@ def main():
     parser = argparse.ArgumentParser(description="Convert Markdown to PDF")
     parser.add_argument("input", help="Input Markdown file (.md)")
     parser.add_argument("output", nargs="?", help="Output PDF file (default: same name as input)")
+    parser.add_argument(
+        "--dark",
+        action="store_true",
+        help="Use dark code block theme (default is light code theme).",
+    )
     args = parser.parse_args()
 
     input_path = args.input
@@ -526,7 +604,7 @@ def main():
         print(f"❌ File not found: {input_path}")
         sys.exit(1)
 
-    convert(input_path, output_path)
+    convert(input_path, output_path, dark_code=args.dark)
 
 
 if __name__ == "__main__":
