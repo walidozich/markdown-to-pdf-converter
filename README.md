@@ -13,6 +13,11 @@ A lightweight Python script that converts Markdown files into clean, styled PDFs
 - Blockquotes
 - Horizontal rules
 - Hyperlinks (clickable in PDF)
+- Markdown pipe tables rendered as real PDF tables
+- Mermaid `xychart-beta` blocks rendered as vector charts in PDF
+- Manual page breaks using `/newpage` (configurable token)
+- Manual extra line spacing using `/n` (configurable token)
+- Optional dark code theme with `--dark`
 - Clean typography with 1-inch margins on US Letter paper
 
 ---
@@ -39,6 +44,15 @@ python md_to_pdf.py input.md
 
 # Specify a custom output path
 python md_to_pdf.py input.md output.pdf
+
+# Use dark code theme (fenced code + inline code)
+python md_to_pdf.py input.md --dark
+
+# Change page-break command token (default: /newpage)
+python md_to_pdf.py input.md --pagebreak-token "/pagebreak"
+
+# Change manual line-break token (default: /n)
+python md_to_pdf.py input.md --newline-token "/br"
 ```
 
 ### Examples
@@ -70,6 +84,14 @@ python md_to_pdf.py docs/notes.md exports/notes.pdf
 | Blockquote         | `> quote`                             |
 | Horizontal rule    | `---` or `***`                        |
 | Link               | `[text](https://example.com)`         |
+| Table              | `| a | b |` + separator line          |
+| Page break         | `/newpage` (alone on a line)          |
+| Extra spacing      | `/n` (alone on a line or inline)      |
+
+### Mermaid Support
+
+- Supported rendering: `xychart-beta` diagrams (`line` and `bar` series)
+- Other Mermaid diagram types are preserved as code blocks (not rendered as charts)
 
 ---
 
@@ -78,7 +100,7 @@ python md_to_pdf.py docs/notes.md exports/notes.pdf
 - Nested lists are not currently supported
 - Images (`![alt](url)`) are not rendered
 - HTML embedded in Markdown is ignored
-- Tables are not supported yet
+- Mermaid rendering is currently limited to `xychart-beta`
 
 ---
 
