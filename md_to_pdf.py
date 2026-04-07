@@ -7,6 +7,7 @@ Usage: python md_to_pdf.py input.md [output.pdf]
 import sys
 import re
 import argparse
+import math
 from pathlib import Path
 
 # Install dependencies if needed:
@@ -25,6 +26,255 @@ from reportlab.lib.enums import TA_LEFT, TA_CENTER
 from reportlab.platypus.flowables import Flowable
 
 
+MERMAID_STARTERS = (
+    "graph ",
+    "flowchart ",
+    "sequenceDiagram",
+    "classDiagram",
+    "stateDiagram",
+    "stateDiagram-v2",
+    "erDiagram",
+    "journey",
+    "gantt",
+    "pie",
+    "mindmap",
+    "timeline",
+    "gitGraph",
+    "xychart-beta",
+)
+
+
+def is_mermaid_start(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    return any(stripped.startswith(prefix) for prefix in MERMAID_STARTERS)
+
+
+def _parse_number_list(payload: str):
+    values = []
+    for part in payload.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        values.append(float(token))
+    return values
+
+
+def parse_mermaid_xychart(code: str):
+    """
+    Parse a Mermaid xychart-beta block.
+    Returns a dict with parsed spec or None if not a valid xychart-beta.
+    """
+    lines = [ln.strip() for ln in code.splitlines() if ln.strip()]
+    if not lines or lines[0] != "xychart-beta":
+        return None
+
+    title = ""
+    x_values = []
+    y_label = ""
+    y_min = None
+    y_max = None
+    series = []
+
+    for ln in lines[1:]:
+        m = re.match(r'^title\s+"(.*)"$', ln)
+        if m:
+            title = m.group(1)
+            continue
+
+        m = re.match(r"^x-axis\s+\[(.*)\]$", ln)
+        if m:
+            x_values = _parse_number_list(m.group(1))
+            continue
+
+        m = re.match(r'^y-axis\s+"(.*)"\s+([\-0-9.]+)\s*-->\s*([\-0-9.]+)$', ln)
+        if m:
+            y_label = m.group(1)
+            y_min = float(m.group(2))
+            y_max = float(m.group(3))
+            continue
+
+        m = re.match(r'^(line|bar)\s+"(.*)"\s+\[(.*)\]$', ln)
+        if m:
+            kind = m.group(1)
+            name = m.group(2)
+            values = _parse_number_list(m.group(3))
+            series.append({"kind": kind, "name": name, "values": values})
+            continue
+
+    if not x_values or not series:
+        return None
+
+    if y_min is None or y_max is None:
+        y_min = min(min(s["values"]) for s in series if s["values"])
+        y_max = max(max(s["values"]) for s in series if s["values"])
+        if y_min == y_max:
+            y_max = y_min + 1.0
+
+    return {
+        "title": title,
+        "x_values": x_values,
+        "y_label": y_label,
+        "y_min": y_min,
+        "y_max": y_max,
+        "series": series,
+    }
+
+
+class MermaidXYChart(Flowable):
+    """Render Mermaid xychart-beta as a vector chart in the PDF."""
+
+    COLORS = [
+        colors.HexColor("#2563eb"),
+        colors.HexColor("#ef4444"),
+        colors.HexColor("#10b981"),
+        colors.HexColor("#f59e0b"),
+        colors.HexColor("#8b5cf6"),
+    ]
+
+    def __init__(self, chart_spec: dict, available_width: float | None = None):
+        super().__init__()
+        self.spec = chart_spec
+        self.available_width = available_width
+        self.chart_height = 260
+
+    def wrap(self, availWidth, availHeight):
+        if self.available_width is None:
+            self.width = availWidth
+        else:
+            self.width = min(self.available_width, availWidth)
+        self.height = self.chart_height
+        return self.width, self.height
+
+    def draw(self):
+        c = self.canv
+        w, h = self.width, self.height
+
+        # Container
+        c.setFillColor(colors.HexColor("#f8fafc"))
+        c.setStrokeColor(colors.HexColor("#cbd5e1"))
+        c.setLineWidth(0.7)
+        c.roundRect(0, 0, w, h, 6, stroke=1, fill=1)
+
+        left = 62
+        right = 24
+        top = 38
+        bottom = 46
+        plot_x0 = left
+        plot_y0 = bottom
+        plot_w = max(80, w - left - right)
+        plot_h = max(80, h - top - bottom)
+
+        title = self.spec.get("title", "")
+        if title:
+            c.setFillColor(colors.HexColor("#0f172a"))
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(14, h - 22, title)
+
+        # Axes
+        c.setStrokeColor(colors.HexColor("#334155"))
+        c.setLineWidth(1)
+        c.line(plot_x0, plot_y0, plot_x0, plot_y0 + plot_h)
+        c.line(plot_x0, plot_y0, plot_x0 + plot_w, plot_y0)
+
+        y_min = float(self.spec["y_min"])
+        y_max = float(self.spec["y_max"])
+        if y_max <= y_min:
+            y_max = y_min + 1.0
+
+        x_values = self.spec["x_values"]
+        y_label = self.spec.get("y_label", "")
+        n = len(x_values)
+        x_step = 0 if n <= 1 else plot_w / (n - 1)
+
+        # Grid + y ticks
+        ticks = 5
+        c.setFont("Helvetica", 8)
+        for t in range(ticks + 1):
+            ratio = t / ticks
+            y = plot_y0 + ratio * plot_h
+            v = y_min + ratio * (y_max - y_min)
+            c.setStrokeColor(colors.HexColor("#e2e8f0"))
+            c.setLineWidth(0.6)
+            c.line(plot_x0, y, plot_x0 + plot_w, y)
+            c.setFillColor(colors.HexColor("#475569"))
+            c.drawRightString(plot_x0 - 6, y - 3, f"{v:.1f}")
+
+        # X ticks
+        c.setFillColor(colors.HexColor("#475569"))
+        for idx, xv in enumerate(x_values):
+            x = plot_x0 + (idx * x_step if n > 1 else plot_w / 2)
+            c.drawCentredString(x, plot_y0 - 14, f"{int(xv) if xv.is_integer() else xv:g}")
+
+        # Y-axis label
+        if y_label:
+            c.saveState()
+            c.setFillColor(colors.HexColor("#334155"))
+            c.setFont("Helvetica", 8)
+            c.translate(16, plot_y0 + (plot_h / 2))
+            c.rotate(90)
+            c.drawCentredString(0, 0, y_label)
+            c.restoreState()
+
+        # Series rendering
+        legend_x = plot_x0 + 8
+        legend_y = h - 18
+        legend_offset = 0
+
+        for idx, s in enumerate(self.spec["series"]):
+            color = self.COLORS[idx % len(self.COLORS)]
+            values = s["values"]
+            points = []
+            for j, value in enumerate(values[:n]):
+                px = plot_x0 + (j * x_step if n > 1 else plot_w / 2)
+                ratio = (value - y_min) / (y_max - y_min)
+                py = plot_y0 + max(0.0, min(1.0, ratio)) * plot_h
+                points.append((px, py))
+
+            if s["kind"] == "bar":
+                if n > 1:
+                    bar_w = max(6, min(20, x_step * 0.55))
+                else:
+                    bar_w = min(30, plot_w * 0.5)
+                for px, py in points:
+                    c.setFillColor(color)
+                    c.setStrokeColor(color)
+                    c.rect(px - (bar_w / 2), plot_y0, bar_w, max(1, py - plot_y0), stroke=0, fill=1)
+            else:
+                c.setStrokeColor(color)
+                c.setLineWidth(1.8)
+                for p0, p1 in zip(points, points[1:]):
+                    c.line(p0[0], p0[1], p1[0], p1[1])
+                c.setFillColor(color)
+                for px, py in points:
+                    c.circle(px, py, 2.4, stroke=0, fill=1)
+
+            # Legend
+            c.setFillColor(color)
+            c.rect(legend_x + legend_offset, legend_y - 6, 8, 8, stroke=0, fill=1)
+            c.setFillColor(colors.HexColor("#1e293b"))
+            c.setFont("Helvetica", 8)
+            c.drawString(legend_x + legend_offset + 11, legend_y - 5, s["name"])
+            legend_offset += 95
+
+
+def mermaid_block_to_flowables(code: str):
+    chart = parse_mermaid_xychart(code)
+    if chart:
+        return [
+            Spacer(1, 6),
+            MermaidXYChart(chart, available_width=None),
+            Spacer(1, 10),
+        ]
+
+    return [
+        Spacer(1, 6),
+        DarkCodeBlock(code, available_width=None),
+        Spacer(1, 10),
+    ]
+
+
 class DarkCodeBlock(Flowable):
     """A flowable that renders a code block with a dark background and bright text."""
 
@@ -38,16 +288,36 @@ class DarkCodeBlock(Flowable):
     PAD_V     = 12   # vertical padding
     RADIUS    = 5
 
-    def __init__(self, code: str, available_width: float):
+    def __init__(self, code: str, available_width: float | None = None):
         super().__init__()
         self.code = code
         self.available_width = available_width
         self.lines = code.splitlines()
 
     def wrap(self, availWidth, availHeight):
-        self.width = self.available_width
+        if self.available_width is None:
+            self.width = availWidth
+        else:
+            self.width = min(self.available_width, availWidth)
         self.height = (len(self.lines) * self.LEADING) + (self.PAD_V * 2)
         return self.width, self.height
+
+    def split(self, availWidth, availHeight):
+        """Allow long code blocks to split across pages instead of raising LayoutError."""
+        usable_height = availHeight - (self.PAD_V * 2)
+        max_lines = int(usable_height // self.LEADING)
+
+        if max_lines <= 0:
+            return []
+        if len(self.lines) <= max_lines:
+            return [self]
+
+        first = "\n".join(self.lines[:max_lines])
+        rest = "\n".join(self.lines[max_lines:])
+        return [
+            DarkCodeBlock(first, self.available_width),
+            DarkCodeBlock(rest, self.available_width),
+        ]
 
     def draw(self):
         c = self.canv
@@ -133,18 +403,33 @@ def parse_md_to_flowables(md_text, styles):
     while i < len(lines):
         line = lines[i]
 
-        # Fenced code block
+        # Fenced code block (supports ``` and ```mermaid)
         if line.startswith("```"):
+            fence_lang = line.strip()[3:].strip().lower()
             code_lines = []
             i += 1
             while i < len(lines) and not lines[i].startswith("```"):
                 code_lines.append(lines[i])
                 i += 1
             code = "\n".join(code_lines)
-            flowables.append(Spacer(1, 6))
-            flowables.append(DarkCodeBlock(code, available_width=6.5 * inch))
-            flowables.append(Spacer(1, 10))
+            if fence_lang == "mermaid":
+                flowables.extend(mermaid_block_to_flowables(code))
+            else:
+                flowables.append(Spacer(1, 6))
+                flowables.append(DarkCodeBlock(code, available_width=None))
+                flowables.append(Spacer(1, 10))
             i += 1
+            continue
+
+        # Mermaid block written without fenced code markers.
+        # We keep reading until a blank line so the source appears verbatim in the PDF.
+        if is_mermaid_start(line):
+            mermaid_lines = [line]
+            i += 1
+            while i < len(lines) and lines[i].strip() != "":
+                mermaid_lines.append(lines[i])
+                i += 1
+            flowables.extend(mermaid_block_to_flowables("\n".join(mermaid_lines)))
             continue
 
         # Headings
