@@ -19,7 +19,7 @@ from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Preformatted,
-    HRFlowable, ListFlowable, ListItem, Table, TableStyle
+    HRFlowable, ListFlowable, ListItem, Table, TableStyle, PageBreak
 )
 from reportlab.lib.enums import TA_LEFT, TA_CENTER
 from reportlab.platypus.flowables import Flowable
@@ -368,9 +368,17 @@ def build_styles():
     return custom
 
 
-def md_inline_to_rl(text, dark_code: bool = False):
+def md_inline_to_rl(text, dark_code: bool = False, newline_token: str = "/n"):
     """Convert inline markdown (bold, italic, inline code) to ReportLab XML."""
     code_spans = []
+
+    # Support inline custom newline token, e.g. "Titre /n Sous-titre"
+    if newline_token:
+        text = re.sub(
+            rf"(?<!\S){re.escape(newline_token)}(?!\S)",
+            "<br/><br/>",
+            text,
+        )
 
     def stash_code(match):
         code_spans.append(match.group(1))
@@ -429,12 +437,27 @@ def is_table_separator_line(line: str):
     return all(re.match(r"^:?-{3,}:?$", c) for c in cells)
 
 
-def make_md_table_flowable(headers, rows, styles, dark_code: bool = False):
-    table_data = [[Paragraph(md_inline_to_rl(h, dark_code=dark_code), styles["body"]) for h in headers]]
+def make_md_table_flowable(
+    headers,
+    rows,
+    styles,
+    dark_code: bool = False,
+    newline_token: str = "/n",
+):
+    table_data = [[
+        Paragraph(md_inline_to_rl(h, dark_code=dark_code, newline_token=newline_token), styles["body"])
+        for h in headers
+    ]]
     for row in rows:
         padded = row + ([""] * (len(headers) - len(row)))
         table_data.append(
-            [Paragraph(md_inline_to_rl(cell, dark_code=dark_code), styles["body"]) for cell in padded[:len(headers)]]
+            [
+                Paragraph(
+                    md_inline_to_rl(cell, dark_code=dark_code, newline_token=newline_token),
+                    styles["body"],
+                )
+                for cell in padded[:len(headers)]
+            ]
         )
 
     table = Table(table_data, repeatRows=1, hAlign="LEFT")
@@ -452,13 +475,32 @@ def make_md_table_flowable(headers, rows, styles, dark_code: bool = False):
     return table
 
 
-def parse_md_to_flowables(md_text, styles, dark_code: bool = False):
+def parse_md_to_flowables(
+    md_text,
+    styles,
+    dark_code: bool = False,
+    pagebreak_token: str = "/newpage",
+    newline_token: str = "/n",
+):
     flowables = []
     lines = md_text.splitlines()
     i = 0
 
     while i < len(lines):
         line = lines[i]
+        stripped_line = line.strip()
+
+        # Manual page break directive (LaTeX-style behavior)
+        if pagebreak_token and stripped_line == pagebreak_token:
+            flowables.append(PageBreak())
+            i += 1
+            continue
+
+        # Manual vertical spacing directive
+        if newline_token and stripped_line == newline_token:
+            flowables.append(Spacer(1, styles["body"].leading))
+            i += 1
+            continue
 
         # Fenced code block (supports ``` and ```mermaid)
         if line.startswith("```"):
@@ -501,7 +543,15 @@ def parse_md_to_flowables(md_text, styles, dark_code: bool = False):
                 rows.append(split_md_table_row(row_line))
                 i += 1
             flowables.append(Spacer(1, 6))
-            flowables.append(make_md_table_flowable(headers, rows, styles, dark_code=dark_code))
+            flowables.append(
+                make_md_table_flowable(
+                    headers,
+                    rows,
+                    styles,
+                    dark_code=dark_code,
+                    newline_token=newline_token,
+                )
+            )
             flowables.append(Spacer(1, 10))
             continue
 
@@ -509,7 +559,7 @@ def parse_md_to_flowables(md_text, styles, dark_code: bool = False):
         m = re.match(r'^(#{1,6})\s+(.*)', line)
         if m:
             level = len(m.group(1))
-            text = md_inline_to_rl(m.group(2).strip(), dark_code=dark_code)
+            text = md_inline_to_rl(m.group(2).strip(), dark_code=dark_code, newline_token=newline_token)
             style_key = f"h{min(level, 3)}"
             flowables.append(Paragraph(text, styles[style_key]))
             i += 1
@@ -526,7 +576,11 @@ def parse_md_to_flowables(md_text, styles, dark_code: bool = False):
         if re.match(r'^[\*\-\+]\s+', line):
             items = []
             while i < len(lines) and re.match(r'^[\*\-\+]\s+', lines[i]):
-                item_text = md_inline_to_rl(re.sub(r'^[\*\-\+]\s+', '', lines[i]), dark_code=dark_code)
+                item_text = md_inline_to_rl(
+                    re.sub(r'^[\*\-\+]\s+', '', lines[i]),
+                    dark_code=dark_code,
+                    newline_token=newline_token,
+                )
                 items.append(ListItem(Paragraph(item_text, styles["li"]), bulletColor=colors.HexColor("#333333")))
                 i += 1
             flowables.append(ListFlowable(items, bulletType='bullet', leftIndent=20))
@@ -536,7 +590,11 @@ def parse_md_to_flowables(md_text, styles, dark_code: bool = False):
         if re.match(r'^\d+\.\s+', line):
             items = []
             while i < len(lines) and re.match(r'^\d+\.\s+', lines[i]):
-                item_text = md_inline_to_rl(re.sub(r'^\d+\.\s+', '', lines[i]), dark_code=dark_code)
+                item_text = md_inline_to_rl(
+                    re.sub(r'^\d+\.\s+', '', lines[i]),
+                    dark_code=dark_code,
+                    newline_token=newline_token,
+                )
                 items.append(ListItem(Paragraph(item_text, styles["li"])))
                 i += 1
             flowables.append(ListFlowable(items, bulletType='1', leftIndent=20))
@@ -544,7 +602,7 @@ def parse_md_to_flowables(md_text, styles, dark_code: bool = False):
 
         # Blockquote
         if line.startswith("> "):
-            quote_text = md_inline_to_rl(line[2:], dark_code=dark_code)
+            quote_text = md_inline_to_rl(line[2:], dark_code=dark_code, newline_token=newline_token)
             flowables.append(Paragraph(f'<i>{quote_text}</i>', styles["blockquote"]))
             i += 1
             continue
@@ -559,16 +617,28 @@ def parse_md_to_flowables(md_text, styles, dark_code: bool = False):
         para_lines = []
         while i < len(lines) and lines[i].strip() != "" and not lines[i].startswith("#") \
               and not lines[i].startswith("```") and not re.match(r'^[\*\-\+]\s+', lines[i]) \
-              and not re.match(r'^\d+\.\s+', lines[i]):
+              and not re.match(r'^\d+\.\s+', lines[i]) \
+              and not (pagebreak_token and lines[i].strip() == pagebreak_token) \
+              and not (newline_token and lines[i].strip() == newline_token):
             para_lines.append(lines[i])
             i += 1
-        text = md_inline_to_rl(" ".join(para_lines), dark_code=dark_code)
+        text = md_inline_to_rl(
+            " ".join(para_lines),
+            dark_code=dark_code,
+            newline_token=newline_token,
+        )
         flowables.append(Paragraph(text, styles["body"]))
 
     return flowables
 
 
-def convert(input_path: str, output_path: str, dark_code: bool = False):
+def convert(
+    input_path: str,
+    output_path: str,
+    dark_code: bool = False,
+    pagebreak_token: str = "/newpage",
+    newline_token: str = "/n",
+):
     md_text = Path(input_path).read_text(encoding="utf-8")
     styles = build_styles()
 
@@ -581,7 +651,13 @@ def convert(input_path: str, output_path: str, dark_code: bool = False):
         bottomMargin=inch,
     )
 
-    flowables = parse_md_to_flowables(md_text, styles, dark_code=dark_code)
+    flowables = parse_md_to_flowables(
+        md_text,
+        styles,
+        dark_code=dark_code,
+        pagebreak_token=pagebreak_token,
+        newline_token=newline_token,
+    )
     doc.build(flowables)
     print(f"✅ PDF saved to: {output_path}")
 
@@ -595,6 +671,16 @@ def main():
         action="store_true",
         help="Use dark code block theme (default is light code theme).",
     )
+    parser.add_argument(
+        "--pagebreak-token",
+        default="/newpage",
+        help="Markdown line token that forces a page break (default: /newpage).",
+    )
+    parser.add_argument(
+        "--newline-token",
+        default="/n",
+        help="Markdown line token that inserts extra vertical spacing (default: /n).",
+    )
     args = parser.parse_args()
 
     input_path = args.input
@@ -604,7 +690,13 @@ def main():
         print(f"❌ File not found: {input_path}")
         sys.exit(1)
 
-    convert(input_path, output_path, dark_code=args.dark)
+    convert(
+        input_path,
+        output_path,
+        dark_code=args.dark,
+        pagebreak_token=args.pagebreak_token,
+        newline_token=args.newline_token,
+    )
 
 
 if __name__ == "__main__":
