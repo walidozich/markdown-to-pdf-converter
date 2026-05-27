@@ -368,7 +368,7 @@ def build_styles():
     return custom
 
 
-def md_inline_to_rl(text, dark_code: bool = False, newline_token: str = "/n"):
+def md_inline_to_rl(text, dark_code: bool = False, newline_token: str = "/n", valid_anchors: set | None = None):
     """Convert inline markdown (bold, italic, inline code) to ReportLab XML."""
     code_spans = []
 
@@ -394,8 +394,19 @@ def md_inline_to_rl(text, dark_code: bool = False, newline_token: str = "/n"):
     # Italic
     text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
     text = re.sub(r'(?<!\w)_(.+?)_(?!\w)', r'<i>\1</i>', text)
+    
     # Links
-    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2" color="blue">\1</a>', text)
+    def link_repl(m):
+        label = m.group(1)
+        target = m.group(2)
+        if target.startswith("#"):
+            anchor_id = target[1:]
+            if valid_anchors is not None and anchor_id not in valid_anchors:
+                # Fallback: if anchor doesn't exist, don't make it a link to avoid ReportLab crash
+                return label
+        return f'<a href="{target}" color="blue">{label}</a>'
+
+    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', link_repl, text)
 
     # Restore inline code spans
     code_color = "#f8f8f2" if dark_code else "#1f2937"
@@ -443,9 +454,10 @@ def make_md_table_flowable(
     styles,
     dark_code: bool = False,
     newline_token: str = "/n",
+    valid_anchors: set | None = None,
 ):
     table_data = [[
-        Paragraph(md_inline_to_rl(h, dark_code=dark_code, newline_token=newline_token), styles["body"])
+        Paragraph(md_inline_to_rl(h, dark_code=dark_code, newline_token=newline_token, valid_anchors=valid_anchors), styles["body"])
         for h in headers
     ]]
     for row in rows:
@@ -453,7 +465,7 @@ def make_md_table_flowable(
         table_data.append(
             [
                 Paragraph(
-                    md_inline_to_rl(cell, dark_code=dark_code, newline_token=newline_token),
+                    md_inline_to_rl(cell, dark_code=dark_code, newline_token=newline_token, valid_anchors=valid_anchors),
                     styles["body"],
                 )
                 for cell in padded[:len(headers)]
@@ -475,6 +487,16 @@ def make_md_table_flowable(
     return table
 
 
+def slugify(text: str) -> str:
+    """Convert text to a URL-friendly slug, matching GitHub-style anchor generation."""
+    text = text.lower()
+    # Remove non-alphanumeric (except space and hyphen)
+    text = re.sub(r"[^a-z0-9 \-]", "", text)
+    # Replace spaces with hyphens
+    text = re.sub(r"\s", "-", text)
+    return text
+
+
 def parse_md_to_flowables(
     md_text,
     styles,
@@ -482,6 +504,13 @@ def parse_md_to_flowables(
     pagebreak_token: str = "/newpage",
     newline_token: str = "/n",
 ):
+    # Pre-scan for heading anchors
+    valid_anchors = set()
+    for line in md_text.splitlines():
+        m = re.match(r'^(#{1,6})\s+(.*)', line)
+        if m:
+            valid_anchors.add(slugify(m.group(2).strip()))
+
     flowables = []
     lines = md_text.splitlines()
     i = 0
@@ -550,6 +579,7 @@ def parse_md_to_flowables(
                     styles,
                     dark_code=dark_code,
                     newline_token=newline_token,
+                    valid_anchors=valid_anchors,
                 )
             )
             flowables.append(Spacer(1, 10))
@@ -559,7 +589,11 @@ def parse_md_to_flowables(
         m = re.match(r'^(#{1,6})\s+(.*)', line)
         if m:
             level = len(m.group(1))
-            text = md_inline_to_rl(m.group(2).strip(), dark_code=dark_code, newline_token=newline_token)
+            raw_text = m.group(2).strip()
+            anchor_id = slugify(raw_text)
+            text = md_inline_to_rl(raw_text, dark_code=dark_code, newline_token=newline_token, valid_anchors=valid_anchors)
+            # Add anchor to the heading
+            text = f'<a name="{anchor_id}"/>{text}'
             style_key = f"h{min(level, 3)}"
             flowables.append(Paragraph(text, styles[style_key]))
             i += 1
@@ -580,6 +614,7 @@ def parse_md_to_flowables(
                     re.sub(r'^[\*\-\+]\s+', '', lines[i]),
                     dark_code=dark_code,
                     newline_token=newline_token,
+                    valid_anchors=valid_anchors,
                 )
                 items.append(ListItem(Paragraph(item_text, styles["li"]), bulletColor=colors.HexColor("#333333")))
                 i += 1
@@ -594,6 +629,7 @@ def parse_md_to_flowables(
                     re.sub(r'^\d+\.\s+', '', lines[i]),
                     dark_code=dark_code,
                     newline_token=newline_token,
+                    valid_anchors=valid_anchors,
                 )
                 items.append(ListItem(Paragraph(item_text, styles["li"])))
                 i += 1
@@ -602,7 +638,7 @@ def parse_md_to_flowables(
 
         # Blockquote
         if line.startswith("> "):
-            quote_text = md_inline_to_rl(line[2:], dark_code=dark_code, newline_token=newline_token)
+            quote_text = md_inline_to_rl(line[2:], dark_code=dark_code, newline_token=newline_token, valid_anchors=valid_anchors)
             flowables.append(Paragraph(f'<i>{quote_text}</i>', styles["blockquote"]))
             i += 1
             continue
@@ -626,6 +662,7 @@ def parse_md_to_flowables(
             " ".join(para_lines),
             dark_code=dark_code,
             newline_token=newline_token,
+            valid_anchors=valid_anchors,
         )
         flowables.append(Paragraph(text, styles["body"]))
 
